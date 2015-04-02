@@ -23,6 +23,32 @@
  * @license <a href="http://kjur.github.io/jsjws/license/">MIT License</a>
  */
 
+var hmac = function (alg, key, data) {
+  var mac = new KJUR.crypto.Mac({alg: 'hmac' + alg, pass: key});
+  mac.updateString(data);
+  return hex2b64(mac.doFinal());
+};
+
+// from https://github.com/goinstant/buffer-equal-constant-time/blob/master/index.js
+// NOTE: keep an eye out for built-in constant time comparison function in Node:
+// https://github.com/joyent/node/issues/8560
+var constTimeEqual = function (s1, s2)
+{
+    "use strict";
+    if (s1.length !== s2.length)
+    {
+        return false;
+    }
+    var i, c = 0;
+    for (i = 0; i < s1.length; i += 1)
+    {
+        /*jslint bitwise: true */
+        c |= s1.charCodeAt(i) ^ s2.charCodeAt(i); // XOR
+        /*jslint bitwise: false */
+    }
+    return c === 0;
+};
+
 if (typeof KJUR == "undefined" || !KJUR) KJUR = {};
 if (typeof KJUR.jws == "undefined" || !KJUR.jws) KJUR.jws = {};
 
@@ -165,24 +191,59 @@ KJUR.jws.JWS = function() {
      * @throws if JWS Header is a malformed JSON string.
      * @deprecated from 3.0.0 please move to {@link KJUR.jws.JWS.verify}
      */
-    this.verifyJWSByKey = function(sJWS, key) {
-	this.parseJWS(sJWS);
-	var hashAlg = _jws_getHashAlgFromParsedHead(this.parsedJWS.headP);
-        var isPSS = this.parsedJWS.headP['alg'].substr(0, 2) == "PS";
+    this.verifyJWSByKey = function(sJWS, key, allowedAlgs) {
+      this.parseJWS(sJWS, (!key) || !key.verifyString);
+      var headP = this.parsedJWS.headP;
+      var alg = headP.alg;
+      if (alg === undefined) {
+          throw new Error('alg not present');
+      }
+      allowedAlgs = allowedAlgs || [];
+      function isAllowed(a) {
+          if (Array.isArray(allowedAlgs)) {
+              return allowedAlgs.indexOf(a) >= 0;
+          } else {
+              return allowedAlgs[a] !== undefined;
+          }
+      }
+      if (!isAllowed(alg)) {
+          throw new Error('algorithm not allowed: ' + alg);
+      }
 
-	if (key.hashAndVerify) {
-	    return key.hashAndVerify(hashAlg,
-				     new Buffer(this.parsedJWS.si, 'utf8').toString('base64'),
-				     b64utob64(this.parsedJWS.sigvalB64U),
-				     'base64',
-				     isPSS);
-	} else if (isPSS) {
-	    return key.verifyStringPSS(this.parsedJWS.si,
-				       this.parsedJWS.sigvalH, hashAlg);
-	} else {
-	    return key.verifyString(this.parsedJWS.si,
-				    this.parsedJWS.sigvalH);
-	}
+      if (alg === 'none') {
+          return true;
+      }
+      if (!key) {
+          if (!isAllowed('none')) {
+              throw new Error('no key but none alg not allowed');
+          }
+          return true;
+      }
+
+      var hashAlg = _jws_getHashAlgFromParsedHead(headP);
+      alg = alg.substr(0, 2);
+      var isPSS = alg === "PS";
+      var r;
+
+      if (key.hashAndVerify) {
+        r = key.hashAndVerify(hashAlg,
+          new Buffer(this.parsedJWS.si, 'utf8'),
+          new Buffer(b64utob64(this.parsedJWS.sigvalB64U), 'base64'),
+          null,
+          isPSS);
+      } else if (isPSS) {
+        r = key.verifyStringPSS(this.parsedJWS.si,
+          this.parsedJWS.sigvalH, hashAlg);
+      } else if (alg === "HS") {
+        r = constTimeEqual(hmac(hashAlg, key, this.parsedJWS.si), b64utob64(this.parsedJWS.sigvalB64U));
+    } else {
+      r = key.verifyString(this.parsedJWS.si,
+        this.parsedJWS.sigvalH);
+    }
+    if (!r) {
+        throw new Error('failed to verify');
+    }
+    return r;
     };
 
     /**
@@ -207,17 +268,27 @@ KJUR.jws.JWS = function() {
     };
 
     // ==== JWS Generation =========================================================
-    function _jws_getHashAlgFromParsedHead(head) {
-	var sigAlg = head["alg"];
-	var hashAlg = "";
-
-	if (sigAlg != "RS256" && sigAlg != "RS512" &&
-	    sigAlg != "PS256" && sigAlg != "PS512")
-	    throw "JWS signature algorithm not supported: " + sigAlg;
-	if (sigAlg.substr(2) == "256") hashAlg = "sha256";
-	if (sigAlg.substr(2) == "512") hashAlg = "sha512";
-	return hashAlg;
+    var supportedAlgos = {
+        RS256: true, RS512: true,
+        PS256: true, PS512: true,
+        HS256: true, HS512: true
     };
+
+    function _jws_getHashAlgFromParsedHead(head) {
+      var sigAlg = head["alg"];
+      var hashAlg = "";
+
+      if (!supportedAlgos[sigAlg]) {
+        throw "JWS signature algorithm not supported: " + sigAlg;
+      }
+      if (sigAlg.substr(2) == "256") {
+        hashAlg = "sha256";
+      }
+      if (sigAlg.substr(2) == "512") {
+        hashAlg = "sha512";
+      }
+      return hashAlg;
+    }
 
     function _jws_getHashAlgFromHead(sHead) {
 	return _jws_getHashAlgFromParsedHead(jsonParse(sHead));
@@ -232,24 +303,29 @@ KJUR.jws.JWS = function() {
 	return sigValue;
     };
 
-    function _jws_generateSignatureValueBySI_Key(sHead, sPayload, sSI, key, head) {
-	var hashAlg = null;
-	if (typeof head == "undefined") {
-	    hashAlg = _jws_getHashAlgFromHead(sHead);
-	} else {
-	    hashAlg = _jws_getHashAlgFromParsedHead(head);
-	}
+    function _jws_generateSignatureValueBySI_Key(headP, sPayload, sSI, key) {
+      var alg = headP.alg;
 
-	var isPSS = head['alg'].substr(0, 2) == "PS";
+      if (alg === 'none') {
+          return '';
+      }
 
-	if (key.hashAndSign) {
-	    return b64tob64u(key.hashAndSign(hashAlg, sSI, 'binary', 'base64', isPSS));
-	} else if (isPSS) {
-	    return hextob64u(key.signStringPSS(sSI, hashAlg));
-	} else {
-	    return hextob64u(key.signString(sSI, hashAlg));
-	}
-    };
+      var hashAlg = _jws_getHashAlgFromParsedHead(headP);
+
+      alg = alg.substr(0, 2);
+
+      var isPSS = alg === "PS";
+
+      if (key.hashAndSign) {
+        return b64tob64u(key.hashAndSign(hashAlg, sSI, 'utf8', 'base64', isPSS));
+      } else if (isPSS) {
+        return hextob64u(key.signStringPSS(sSI, hashAlg));
+      } else if (alg === "HS") {
+        return b64tob64u(hmac(hashAlg, key, sSI));
+      } else {
+        return hextob64u(key.signString(sSI, hashAlg));
+      }
+    }
 
     function _jws_generateSignatureValueByNED(sHead, sPayload, hN, hE, hD) {
 	var sSI = _getSignatureInputByString(sHead, sPayload);
@@ -301,18 +377,19 @@ KJUR.jws.JWS = function() {
      * @deprecated from 3.0.0 please move to {@link KJUR.jws.JWS.sign}
      */
     this.generateJWSByKey = function(sHead, sPayload, key) {
-	var obj = {};
-	if (!this.isSafeJSONString(sHead, obj, 'headP'))
-	    throw "JWS Head is not safe JSON string: " + sHead;
-	var sSI = _getSignatureInputByString(sHead, sPayload);
-	var b64SigValue = _jws_generateSignatureValueBySI_Key(sHead, sPayload, sSI, key, obj.headP);
+      var obj = {};
+      if (!this.isSafeJSONString(sHead, obj, 'headP')) {
+        throw "JWS Head is not safe JSON string: " + sHead;
+      }
+      var sSI = _getSignatureInputByString(sHead, sPayload);
+      var b64SigValue = _jws_generateSignatureValueBySI_Key(obj.headP, sPayload, sSI, key);
 
-	this.parsedJWS = {};
-	this.parsedJWS.headB64U = sSI.split(".")[0];
-	this.parsedJWS.payloadB64U = sSI.split(".")[1];
-	this.parsedJWS.sigvalB64U = b64SigValue;
+      this.parsedJWS = {};
+      this.parsedJWS.headB64U = sSI.split(".")[0];
+      this.parsedJWS.payloadB64U = sSI.split(".")[1];
+      this.parsedJWS.sigvalB64U = b64SigValue;
 
-	return sSI + "." + b64SigValue;
+      return sSI + "." + b64SigValue;
     };
 
     // === sign with PKCS#1 RSA private key =====================================================
@@ -465,12 +542,13 @@ KJUR.jws.JWS.sign = function(alg, sHeader, sPayload, key, pass) {
  * @static
  * @param {String} sJWS string of JWS signature to verify
  * @param {String} key string of public key, certificate or key object to verify
+ * @param {Array} allowedAlgs array of allowed algorithms to verify
  * @return {Boolean} true if the signature is valid otherwise false
  * @since jws 3.0.0
  * @see <a href="http://kjur.github.io/jsrsasign/api/symbols/KJUR.crypto.Signature.html">jsrsasign KJUR.crypto.Signature method</a>
  * @see <a href="http://kjur.github.io/jsrsasign/api/symbols/KJUR.crypto.Mac.html">jsrsasign KJUR.crypto.Mac method</a>
  */
-KJUR.jws.JWS.verify = function(sJWS, key) {
+KJUR.jws.JWS.verify = function(sJWS, key, allowedAlgs) {
     var jws = KJUR.jws.JWS;
     var a = sJWS.split(".");
     var uHeader = a[0];
@@ -481,44 +559,67 @@ KJUR.jws.JWS.verify = function(sJWS, key) {
     var pHeader = jws.readSafeJSONString(b64utoutf8(a[0]));
     var alg = null;
     if (pHeader.alg === undefined) {
-	throw "algorithm not specified in header";
+      throw "algorithm not specified in header";
     } else {
-	alg = pHeader.alg;
+      alg = pHeader.alg;
+    }
+
+    function isAllowed(a) {
+      if (Array.isArray(allowedAlgs)) {
+        return allowedAlgs.indexOf(a) >= 0;
+      } else {
+        return allowedAlgs[a] !== undefined;
+      }
+    }
+
+    if (!isAllowed(alg)) {
+        throw new Error('algorithm not allowed: ' + alg);
+    }
+
+    if (alg === 'none') {
+        return true;
+    }
+    if (!key) {
+        if (!isAllowed('none')) {
+            throw new Error('no key but none alg not allowed');
+        }
+        return true;
     }
 
     var sigAlg = null;
     if (jws.jwsalg2sigalg[pHeader.alg] === undefined) {
-	throw "unsupported alg name: " + alg;
+      throw "unsupported alg name: " + alg;
     } else {
-	sigAlg = jws.jwsalg2sigalg[alg];
+      sigAlg = jws.jwsalg2sigalg[alg];
     }
 
+    var sig;
+
     // x. verify
-    if (sigAlg == "none") {
-	return true;
-    } else if (sigAlg.substr(0, 4) == "Hmac") {
-	if (key === undefined)
-	    throw "hexadecimal key shall be specified for HMAC";
-	var mac = new KJUR.crypto.Mac({'alg': sigAlg, 'pass': hextorstr(key)});
-	mac.updateString(uSignatureInput);
-	hSig2 = mac.doFinal();
-	return hSig == hSig2;
+    if (sigAlg.substr(0, 4) == "Hmac") {
+      if (key === undefined) {
+        throw "hexadecimal key shall be specified for HMAC";
+      }
+      var mac = new KJUR.crypto.Mac({'alg': sigAlg, 'pass': hextorstr(key)});
+      mac.updateString(uSignatureInput);
+      hSig2 = mac.doFinal();
+      return hSig == hSig2;
     } else if (sigAlg.indexOf("withECDSA") != -1) {
-	var hASN1Sig = null;
-        try {
-	    hASN1Sig = KJUR.crypto.ECDSA.concatSigToASN1Sig(hSig);
-	} catch (ex) {
-	    return false;
-	}
-	var sig = new KJUR.crypto.Signature({'alg': sigAlg});
-	sig.init(key)
-	sig.updateString(uSignatureInput);
-	return sig.verify(hASN1Sig);
+      var hASN1Sig = null;
+      try {
+        hASN1Sig = KJUR.crypto.ECDSA.concatSigToASN1Sig(hSig);
+      } catch (ex) {
+        return false;
+      }
+      sig = new KJUR.crypto.Signature({'alg': sigAlg});
+      sig.init(key);
+      sig.updateString(uSignatureInput);
+      return sig.verify(hASN1Sig);
     } else {
-	var sig = new KJUR.crypto.Signature({'alg': sigAlg});
-	sig.init(key)
-	sig.updateString(uSignatureInput);
-	return sig.verify(hSig);
+      sig = new KJUR.crypto.Signature({'alg': sigAlg});
+      sig.init(key);
+      sig.updateString(uSignatureInput);
+      return sig.verify(hSig);
     }
 };
 

@@ -6,6 +6,7 @@
 <script src="http://crypto-js.googlecode.com/svn/tags/3.1.2/build/components/sha256.js"></script>
 <script src="http://crypto-js.googlecode.com/svn/tags/3.1.2/build/components/x64-core.js"></script>
 <script src="http://crypto-js.googlecode.com/svn/tags/3.1.2/build/components/sha512.js"></script>
+<script src="http://crypto-js.googlecode.com/svn/tags/3.1.2/build/components/hmac.js"></script>
 
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/ext/base64.js"></script>
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/ext/jsbn.js"></script>
@@ -16,11 +17,12 @@
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/asn1hex-1.1.js"></script>
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/x509-1.1.js"></script>
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/crypto-1.1.js"></script>
+<script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/keyutil-1.0.js"></script>
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/base64x-1.1.js"></script>
 <script language="JavaScript" type="text/javascript" src="http://kjur.github.io/jsrsasign/rsasign-1.2.js"></script>
 
 <script language="JavaScript" type="text/javascript" src="ext/json-sans-eval.js"></script>
-<script language="JavaScript" type="text/javascript" src="jws-2.0.js"></script>
+<script language="JavaScript" type="text/javascript" src="jws-3.0.js"></script>
 
 <style type="text/css">
 TD  {vertical-align: top; border: solid 1px #000000; }
@@ -30,31 +32,41 @@ function doVerify() {
   var sJWS = document.form1.jws1.value;
   var sCert = document.form1.cert1.value;
 
-  var jws = new KJUR.jws.JWS();
   var result = 0;
-  //try {
-    var cert = new X509();
-    cert.readCertPEM(sCert);
-    result = jws.verifyJWSByKey(sJWS, cert.subjectPublicKeyRSA);
-  //} catch (ex) {
-  //  alert("Error: " + ex);
-  //  result = 0;
-  //}
+  try {
+    var cert;
+    if (sCert.indexOf("-----BEGIN") === 0)
+    {
+      cert = new X509();
+      cert.readCertPEM(sCert);
+      cert = cert.subjectPublicKeyRSA;
+    }
+    else
+    {
+      cert = sCert;
+    }
+    result = KJUR.jws.JWS.verify(sJWS, cert, ['PS256']);
+  } catch (ex) {
+    alert(ex);
+    result = 0;
+  }
 
-  document.form1.im_enchead1.value = jws.parsedJWS.headB64U;
-  document.form1.im_encpayload1.value = jws.parsedJWS.payloadB64U;
-  document.form1.im_encsigval1.value = jws.parsedJWS.sigvalB64U;
-  document.form1.im_siginput1.value = jws.parsedJWS.si;
-  document.form1.im_sigval_h1.value = jws.parsedJWS.sigvalH;
-
-  document.form1.im_head1.value = jws.parsedJWS.headS;
-  document.form1.im_payload1.value = jws.parsedJWS.payloadS;
-
-  if (result == 1) {
+  if (result) {
     alert("JWS signature is *Valid*.");
   } else {
     alert("JWS signature is *Invalid*.");
   }
+
+  // TODO Implement
+  // document.form1.im_enchead1.value = jws.parsedJWS.headB64U;
+  // document.form1.im_encpayload1.value = jws.parsedJWS.payloadB64U;
+  // document.form1.im_encsigval1.value = jws.parsedJWS.sigvalB64U;
+  // document.form1.im_siginput1.value = jws.parsedJWS.si;
+  // document.form1.im_sigval_h1.value = jws.parsedJWS.sigvalH;
+
+  // document.form1.im_head1.value = jws.parsedJWS.headS;
+  // document.form1.im_payload1.value = jws.parsedJWS.payloadS;
+
 }
 </script>
 </head>
@@ -73,7 +85,7 @@ Default values are cited from <a href="http://tools.ietf.org/html/draft-jones-js
 <tbody>
 <tr><td rowspan="2">Input</td><td>JWS</td><td colspan="2">
 <textarea name="jws1" rows="8" cols="100">
-eyJhbGciOiJQUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.D9-tkEEU1-kgfZ2g4WjaYwZLpDxjt8D83IsGOeaiBzLeUDMYmlqt5hspvpkLZOeSb8jEtgTdEQ77u1QReGbMw_5n9kaarXI1KJbTFbkOOP0O7ElSqK1Ebfrw8BQR-Ws0e-Qz0N0O8WFtwDpmeysnE0juwF_r18Qv8S3QnrWPkIUB7buDIaOldDfts4nyLSUj0X-C3WHK-JpZ-jXGpI5OMAObIY1FLvSKYmJPXKUWe1t3mecrzQgQSGsNg2WoiosgLzk8JrTjIFX9XTLTQRNZevDgy-2VfGr43K80SslJD3a_f-Cpl6IzaHmFWotSzYJ5e4n5fc9Q7UVIWwgrtxiqYg</textarea></td></tr>
+eyJhbGciOiJQUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.tl3P5Mgv86_DycHuABVhohJP_iGakNq6ugfFtVxx8MRh7dVSEeT0jcYc_cdiLrJGmWYZ3ZRQWRErpdUZ5oiwHmApYBqQmyLp5szMKsjzaOkvW_ql9v0OYZh2PTJLzVsDq3xKTHg9oq4dvuL8egkohFWvtHFJq_CK1acX86h22Gq5l1hLd5udiGDffgyuxuJLgC5OZsCCI6JQmRBaSF8NfrG98nk0BO1WYK5jmoRo6OERNk1Joji0FIMyKmSRoirbJr8dC2XrNERLupWY3tVWlI3mL5XzATQbCipAT--3iGfxAW3dYXN45cRC9X9n8iwMjwY8nreAnjJF9K3ZYRNaeg</textarea></td></tr>
 <tr><td>PEM X.509 Certificate verify with</td><td colspan="2">
 <textarea name="cert1" cols="65" rows="8">-----BEGIN CERTIFICATE-----
 MIIDMjCCAhqgAwIBAgIJAKMfG/B2MKd5MA0GCSqGSIb3DQEBBQUAMBoxCzAJBgNV
